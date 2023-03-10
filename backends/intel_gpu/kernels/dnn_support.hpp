@@ -24,6 +24,7 @@
 #include <CL/sycl.hpp>
 #include "glog/logging.h"
 #include "oneapi/dnnl/dnnl_sycl.hpp"
+#include "oneapi/ccl.hpp"
 // clang-format on
 namespace config {
 enum SUBSYS_LEVELS { vError = 16 };

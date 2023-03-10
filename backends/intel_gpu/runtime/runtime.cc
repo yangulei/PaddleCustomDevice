@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include <unistd.h>
+#include "./dnn_support.hpp"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
 
-#include "./dnn_support.hpp"
 #include "paddle/phi/backends/device_ext.h"
 
 #define MEMORY_FRACTION 0.5f
@@ -52,7 +52,7 @@ struct DeviceCtx {
   bool _def_stream;
   size_t allocated_mem;
   size_t _dev_memory_size;
-  explicit DeviceCtx(sycl::device dev)
+  DeviceCtx(sycl::device dev)
       : _dev{std::move(dev)},
         _def_stream{true},
         allocated_mem{0},
@@ -80,7 +80,7 @@ struct DeviceCtx {
     return *(_streams[index]);
   }
 
-  void copy(const sycl::queue &q, void *dst, const void *src, size_t size) {
+  void copy(sycl::queue &q, void *dst, const void *src, size_t size) {
     q.submit([&](sycl::handler &h) { h.memcpy(dst, src, size); });
     q.wait();
   }
@@ -386,6 +386,212 @@ C_Status MemoryCopyD2D(const C_Device device,
   return C_SUCCESS;
 }
 
+ccl::datatype ToOccl(const C_DataType data_type) {
+  ccl::datatype dtype;
+  if (data_type == C_DataType::UINT8) {
+    dtype = ccl::datatype::uint8;
+  } else if (data_type == C_DataType::UINT16) {
+    dtype = ccl::datatype::uint16;
+  } else if (data_type == C_DataType::UINT32) {
+    dtype = ccl::datatype::uint32;
+  } else if (data_type == C_DataType::UINT64) {
+    dtype = ccl::datatype::uint64;
+  } else if (data_type == C_DataType::INT8) {
+    dtype = ccl::datatype::int8;
+  } else if (data_type == C_DataType::INT16) {
+    dtype = ccl::datatype::int16;
+  } else if (data_type == C_DataType::INT32) {
+    dtype = ccl::datatype::int32;
+  } else if (data_type == C_DataType::INT64) {
+    dtype = ccl::datatype::int64;
+  } else if (data_type == C_DataType::FLOAT16) {
+    dtype = ccl::datatype::float16;
+  } else if (data_type == C_DataType::FLOAT32) {
+    dtype = ccl::datatype::float32;
+  } else if (data_type == C_DataType::FLOAT64) {
+    dtype = ccl::datatype::float64;
+  } else if (data_type == C_DataType::BFLOAT16) {
+    dtype = ccl::datatype::bfloat16;
+  } else {
+    LOG(ERROR) << "Datatype " << data_type << " is not supported in oneCCL.";
+  }
+  return dtype;
+}
+
+ccl::reduction ToOccl(const C_CCLReduceOp op) {
+  ccl::reduction reduction;
+  if (op == C_CCLReduceOp::SUM) {
+    reduction = ccl ::reduction::sum;
+  } else if (op == C_CCLReduceOp::PRODUCT) {
+    reduction = ccl ::reduction::prod;
+  } else if (op == C_CCLReduceOp::MAX) {
+    reduction = ccl ::reduction::max;
+  } else if (op == C_CCLReduceOp::MIN) {
+    reduction = ccl ::reduction::min;
+  } else {
+    LOG(ERROR) << "ReduceOp " << op << "is not supported in oneCCL.";
+  }
+  return reduction;
+}
+
+C_Status OcclGetUniqueIdSize(size_t *size) {
+  *size = ccl::kvs::address_max_size;
+  return C_SUCCESS;
+}
+
+C_Status OcclGetUniqueId(C_CCLRootId *unique_id) {
+  auto kvs = ccl::create_main_kvs();
+  auto kvs_addr = kvs->get_address();
+  memcpy(unique_id->data, (void *)kvs_addr.data(), ccl::kvs::address_max_size);
+  return C_SUCCESS;
+}
+
+C_Status OcclCommInitRank(size_t nranks,
+                          C_CCLRootId *unique_id,
+                          size_t rank,
+                          C_CCLComm *comm) {
+  ccl::kvs::address_type kvs_addr;
+  memcpy((void *)kvs_addr.data(), unique_id->data, ccl::kvs::address_max_size);
+  auto kvs = ccl::create_kvs(kvs_addr);
+  auto ccl_comm = reinterpret_cast<ccl::communicator *>(comm);
+  *ccl_comm = ccl::create_communicator(nranks, rank, kvs);
+  return C_SUCCESS;
+}
+
+C_Status OcclDestroyComm(C_CCLComm comm) {
+  if (comm) {
+    delete reinterpret_cast<ccl::communicator *>(comm);
+    comm = nullptr;
+  }
+  return C_SUCCESS;
+}
+
+C_Status OcclAllReduce(void *send_buf,
+                       void *recv_buf,
+                       size_t count,
+                       C_DataType data_type,
+                       C_CCLReduceOp op,
+                       C_CCLComm comm,
+                       C_Stream stream) {
+  auto ret_evt = ccl::allreduce(
+      send_buf,
+      recv_buf,
+      count,
+      ToOccl(data_type),
+      ToOccl(op),
+      *reinterpret_cast<ccl::communicator *>(comm),
+      ccl::create_stream(*reinterpret_cast<sycl::queue *>(stream)));
+  ret_evt.wait();
+  return C_SUCCESS;
+}
+
+C_Status OcclBroadcast(void *buf,
+                       size_t count,
+                       C_DataType data_type,
+                       size_t root,
+                       C_CCLComm comm,
+                       C_Stream stream) {
+  auto ret_evt = ccl::broadcast(
+      buf,
+      count,
+      ToOccl(data_type),
+      root,
+      *reinterpret_cast<ccl::communicator *>(comm),
+      ccl::create_stream(*reinterpret_cast<sycl::queue *>(stream)));
+  ret_evt.wait();
+  return C_SUCCESS;
+}
+
+C_Status OcclReduce(void *send_buf,
+                    void *recv_buf,
+                    size_t count,
+                    C_DataType data_type,
+                    C_CCLReduceOp op,
+                    size_t root,
+                    C_CCLComm comm,
+                    C_Stream stream) {
+  auto ret_evt =
+      ccl::reduce(send_buf,
+                  recv_buf,
+                  count,
+                  ToOccl(data_type),
+                  ToOccl(op),
+                  root,
+                  *reinterpret_cast<ccl::communicator *>(comm),
+                  ccl::create_stream(*reinterpret_cast<sycl::queue *>(stream)));
+  ret_evt.wait();
+  return C_SUCCESS;
+}
+
+C_Status OcclAllGather(void *send_buf,
+                       void *recv_buf,
+                       size_t count,
+                       C_DataType data_type,
+                       C_CCLComm comm,
+                       C_Stream stream) {
+  auto occl_comm = reinterpret_cast<ccl::communicator *>(comm);
+  std::vector<size_t> recv_counts(occl_comm->size(), count);
+  auto ret_evt = ccl::allgatherv(
+      send_buf,
+      count,
+      recv_buf,
+      recv_counts,
+      ToOccl(data_type),
+      *occl_comm,
+      ccl::create_stream(*reinterpret_cast<sycl::queue *>(stream)));
+  ret_evt.wait();
+  return C_SUCCESS;
+}
+
+C_Status OcclReduceScatter(void *send_buf,
+                           void *recv_buf,
+                           size_t count,
+                           C_DataType data_type,
+                           C_CCLReduceOp op,
+                           C_CCLComm comm,
+                           C_Stream stream) {
+  auto ret_evt = ccl::reduce_scatter(
+      send_buf,
+      recv_buf,
+      count,
+      ToOccl(data_type),
+      ToOccl(op),
+      *reinterpret_cast<ccl::communicator *>(comm),
+      ccl::create_stream(*reinterpret_cast<sycl::queue *>(stream)));
+  ret_evt.wait();
+  return C_SUCCESS;
+}
+
+C_Status OcclGroupStart() {
+  LOG(ERROR) << "xccl_group_start is not supported in oneCCL.";
+  return C_ERROR;
+}
+
+C_Status OcclGroupEnd() {
+  LOG(ERROR) << "xccl_group_end is not supported in oneCCL.";
+  return C_ERROR;
+}
+
+C_Status OcclSend(void *send_buf,
+                  size_t count,
+                  C_DataType data_type,
+                  size_t dest_rank,
+                  C_CCLComm comm,
+                  C_Stream stream) {
+  LOG(ERROR) << "xccl_send is not supported in oneCCL.";
+  return C_ERROR;
+}
+
+C_Status OcclRecv(void *recv_buf,
+                  size_t count,
+                  C_DataType data_type,
+                  size_t src_rank,
+                  C_CCLComm comm,
+                  C_Stream stream) {
+  LOG(ERROR) << "xccl_recv is not supported in oneCCL.";
+  return C_ERROR;
+}
+
 void InitPlugin(CustomRuntimeParams *params) {
   PADDLE_CUSTOM_RUNTIME_CHECK_VERSION(params);
   params->device_type = "intel_gpu";
@@ -439,4 +645,18 @@ void InitPlugin(CustomRuntimeParams *params) {
   params->interface->get_device_list = GetDevicesList;
   params->interface->device_memory_stats = DeviceMemStats;
   params->interface->device_min_chunk_size = DeviceMinChunkSize;
+
+  params->interface->xccl_get_unique_id_size = OcclGetUniqueIdSize;
+  params->interface->xccl_get_unique_id = OcclGetUniqueId;
+  params->interface->xccl_comm_init_rank = OcclCommInitRank;
+  params->interface->xccl_destroy_comm = OcclDestroyComm;
+  params->interface->xccl_all_reduce = OcclAllReduce;
+  params->interface->xccl_broadcast = OcclBroadcast;
+  params->interface->xccl_reduce = OcclReduce;
+  params->interface->xccl_all_gather = OcclAllGather;
+  params->interface->xccl_reduce_scatter = OcclReduceScatter;
+  params->interface->xccl_group_start = OcclGroupStart;
+  params->interface->xccl_group_end = OcclGroupEnd;
+  params->interface->xccl_send = OcclSend;
+  params->interface->xccl_recv = OcclRecv;
 }
