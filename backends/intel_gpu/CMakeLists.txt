@@ -27,6 +27,15 @@ if(NOT EXISTS "${ONEAPI_PATH}/${ONEAPI_COMPILER_DIR}")
     FATAL_ERROR "Can't find directory ${ONEAPI_PATH}/${ONEAPI_COMPILER_DIR}")
 endif()
 
+if(NOT DEFINED ONEAPI_ONECCL_DIR)
+  set(ONEAPI_ONECCL_DIR "ccl/latest")
+endif()
+
+if(NOT EXISTS "${ONEAPI_PATH}/${ONEAPI_ONECCL_DIR}")
+  message(
+    FATAL_ERROR "Can't find directory ${ONEAPI_PATH}/${ONEAPI_ONECCL_DIR}")
+endif()
+
 if(NOT DEFINED ENV{CONDA_PREFIX})
   message(FATAL_ERROR "Please install python miniconda ")
 endif()
@@ -56,11 +65,13 @@ set(DPCPP_COMPIER_PATH "${ONEAPI_PATH}/${ONEAPI_COMPILER_DIR}/linux/bin/dpcpp")
 set(ONEAPI_SYCL_INCLUDE
     "${ONEAPI_PATH}/${ONEAPI_COMPILER_DIR}/linux/include/sycl/")
 set(ONEAPI_SYCL_LIBDIR "${ONEAPI_PATH}/${ONEAPI_COMPILER_DIR}/linux/lib/")
+set(ONEAPI_ONECCL_INCLUDE "${ONEAPI_PATH}/${ONEAPI_ONECCL_DIR}/include/cpu_gpu_dpcpp/")
+set(ONEAPI_ONECCL_LIBDIR "${ONEAPI_PATH}/${ONEAPI_ONECCL_DIR}/lib/cpu_gpu_dpcpp/")
 set(CMAKE_CXX_COMPILER "${DPCPP_COMPIER_PATH}")
 
 # TODO(Zhiwei35): when using oneDNN, should add oneDNN include dir.
 if(WITH_ONEDNN)
-  include_directories(${ONEAPI_SYCL_INCLUDE} ${ONEDNN_INC})
+  include_directories(${ONEAPI_SYCL_INCLUDE} ${ONEDNN_INC} ${ONEAPI_ONECCL_INCLUDE})
 else()
   include_directories(${ONEAPI_SYCL_INCLUDE} $ENV{DPL_ROOT}/include)
 endif()
@@ -102,7 +113,7 @@ add_library(${PLUGIN_NAME} SHARED ${PLUGIN_SRCS})
 # link paddle shared library
 include(third_party)
 add_dependencies(${PLUGIN_NAME} third_party)
-target_link_libraries(${PLUGIN_NAME} PRIVATE ${PADDLE_CORE_LIB})
+target_link_libraries(${PLUGIN_NAME} PRIVATE ${PADDLE_CORE_LIB} "ccl")
 
 if("${CMAKE_CXX_COMPILER}" STREQUAL "${DPCPP_COMPIER_PATH}")
   add_definitions(-DUSEDPCPP)
